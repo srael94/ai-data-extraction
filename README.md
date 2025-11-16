@@ -52,6 +52,17 @@ Extracts from Windsurf
 - **Formats**: SQLite databases (VSCode-like format)
 - **Includes**: Chat, agent/flow conversations, code context
 
+### 6. `extract_continue.py`
+Extracts from Continue AI Assistant
+- **Searches**: `~/.continue/sessions/`
+- **Formats**: JSON session files
+- **Includes**:
+  - User/assistant messages
+  - Tool calls and results
+  - Reasoning blocks
+  - Context items
+  - Workspace information
+
 ## 🚀 Quick Start
 
 ### Installation

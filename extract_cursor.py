@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-COMPLETE Cursor extraction - handles ALL storage formats:
-- Chat mode (workspace ItemTable)
-- Composer inline storage (conversation array in composerData)
-- Composer separate storage (bubbleId keys)
-- Code block diffs (codeBlockDiff keys)
+ULTIMATE Cursor extraction - EVERY VERSION, EVERY FORMAT:
+1. Chat mode (workspace ItemTable - workbench.panel.aichat)
+2. aiService (OLD format - pre-v0.43 prompts/generations)
+3. Workspace composers (composer.composerData in workspace ItemTable)
+4. Global composers inline (composerData.conversation[] in global cursorDiskKV)
+5. Global composers separate (bubbleId:{composer}:{bubble} in global cursorDiskKV)
 
-This extractor finds ALL Cursor data across all versions and storage formats.
+This gets EVERYTHING from v0.2 through v2.0+
 """
 
 import json
@@ -52,12 +53,156 @@ def find_cursor_installations():
 
     return list(set(locations))
 
-def extract_chat_mode(db_path, workspace_id):
-    """Extract old-style Chat conversations with full context"""
+def extract_aiservice_conversations(db_path, workspace_id):
+    """Extract OLD Cursor format (pre-v0.43) aiService prompts and generations"""
     conversations = []
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        cursor = conn.cursor()
+
+        # Get prompts
+        cursor.execute("SELECT value FROM ItemTable WHERE key = 'aiService.prompts'")
+        prompts_result = cursor.fetchone()
+
+        # Get generations
+        cursor.execute("SELECT value FROM ItemTable WHERE key = 'aiService.generations'")
+        gens_result = cursor.fetchone()
+
+        if prompts_result or gens_result:
+            prompts = json.loads(prompts_result[0]) if prompts_result else []
+            generations = json.loads(gens_result[0]) if gens_result else []
+
+            # Pair prompts with generations
+            max_len = max(len(prompts), len(generations))
+
+            for i in range(max_len):
+                messages = []
+
+                if i < len(prompts):
+                    prompt = prompts[i]
+                    messages.append({
+                        'role': 'user',
+                        'content': prompt.get('text', ''),
+                        'command_type': prompt.get('commandType')
+                    })
+
+                if i < len(generations):
+                    gen = generations[i]
+                    messages.append({
+                        'role': 'assistant',
+                        'content': gen.get('text', gen.get('message', '')),
+                    })
+
+                if messages:
+                    conversations.append({
+                        'messages': messages,
+                        'source': 'cursor-aiservice',
+                        'workspace_id': workspace_id
+                    })
+
+        conn.close()
+    except Exception as e:
+        pass
+
+    return conversations
+
+def extract_workspace_composers(db_path, workspace_id):
+    """Extract workspace-specific composer data (pre-migration to global storage)"""
+    conversations = []
+
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT value FROM ItemTable WHERE key = 'composer.composerData'")
+        result = cursor.fetchone()
+
+        if result:
+            data = json.loads(result[0])
+
+            if isinstance(data, dict) and 'allComposers' in data:
+                all_composers = data['allComposers']
+
+                if isinstance(all_composers, list):
+                    for composer_data in all_composers:
+                        if not isinstance(composer_data, dict):
+                            continue
+
+                        messages = []
+                        code_contexts = []
+                        diffs = []
+
+                        conversation = composer_data.get('conversation', [])
+
+                        for bubble in conversation:
+                            bubble_type = bubble.get('type')
+                            text = bubble.get('text', '')
+
+                            if bubble_type == 1:  # User
+                                msg = {
+                                    'role': 'user',
+                                    'content': text
+                                }
+
+                                context = bubble.get('context', {})
+                                if context and 'selections' in context:
+                                    ctx = []
+                                    for sel in context['selections']:
+                                        if 'uri' in sel and 'fsPath' in sel['uri']:
+                                            ctx.append({
+                                                'file': sel['uri']['fsPath'],
+                                                'code': sel.get('text', sel.get('rawText', '')),
+                                                'range': sel.get('range')
+                                            })
+                                    if ctx:
+                                        msg['code_context'] = ctx
+                                        code_contexts.extend(ctx)
+
+                                messages.append(msg)
+
+                            elif bubble_type == 2:  # AI
+                                msg = {
+                                    'role': 'assistant',
+                                    'content': text
+                                }
+
+                                if 'codeBlocks' in bubble and bubble['codeBlocks']:
+                                    msg['code_blocks'] = bubble['codeBlocks']
+
+                                if 'suggestedCodeBlocks' in bubble and bubble['suggestedCodeBlocks']:
+                                    msg['suggested_code_blocks'] = bubble['suggestedCodeBlocks']
+                                    diffs.extend(bubble['suggestedCodeBlocks'])
+
+                                if 'diffHistories' in bubble and bubble['diffHistories']:
+                                    msg['diff_histories'] = bubble['diffHistories']
+                                    diffs.extend(bubble['diffHistories'])
+
+                                messages.append(msg)
+
+                        if messages:
+                            conversations.append({
+                                'messages': messages,
+                                'source': 'cursor-workspace-composer',
+                                'composer_id': composer_data.get('composerId'),
+                                'name': composer_data.get('name', 'Untitled'),
+                                'workspace_id': workspace_id,
+                                'has_code_context': len(code_contexts) > 0,
+                                'has_diffs': len(diffs) > 0
+                            })
+
+        conn.close()
+    except Exception as e:
+        pass
+
+    return conversations
+
+def extract_chat_mode(db_path, workspace_id):
+    """Extract Chat mode conversations"""
+    conversations = []
+
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM ItemTable WHERE key = 'workbench.panel.aichat.view.aichat.chatdata'")
         result = cursor.fetchone()
@@ -80,7 +225,6 @@ def extract_chat_mode(db_path, workspace_id):
                                 'content': content
                             }
 
-                            # Extract code context
                             if 'selections' in bubble and bubble['selections']:
                                 ctx = []
                                 for sel in bubble['selections']:
@@ -94,7 +238,6 @@ def extract_chat_mode(db_path, workspace_id):
                                     msg['code_context'] = ctx
                                     code_context.extend(ctx)
 
-                            # Extract suggested diffs
                             if 'suggestedDiffs' in bubble and bubble['suggestedDiffs']:
                                 msg['suggested_diffs'] = bubble['suggestedDiffs']
                                 suggested_diffs.extend(bubble['suggestedDiffs'])
@@ -114,16 +257,15 @@ def extract_chat_mode(db_path, workspace_id):
 
         conn.close()
     except Exception as e:
-        print(f"Error extracting chat from {db_path}: {e}")
+        pass
 
     return conversations
 
 def extract_bubbles_for_composer(cursor, composer_id):
-    """Extract all separate bubble entries for a composer"""
+    """Extract separate bubble storage for a composer"""
     bubbles = []
 
     try:
-        # Get all bubbles for this composer
         cursor.execute(
             "SELECT key, value FROM cursorDiskKV WHERE key LIKE ?",
             (f'bubbleId:{composer_id}:%',)
@@ -144,9 +286,7 @@ def extract_bubbles_for_composer(cursor, composer_id):
                     'bubble_id': key.split(':')[2]
                 }
 
-                # Extract code context for user messages
                 if bubble_type == 1:
-                    # Check for selections in the bubble data
                     if 'selections' in bubble_data:
                         ctx = []
                         for sel in bubble_data.get('selections', []):
@@ -159,7 +299,6 @@ def extract_bubbles_for_composer(cursor, composer_id):
                         if ctx:
                             msg['code_context'] = ctx
 
-                # Extract diffs and code blocks for AI messages
                 elif bubble_type == 2:
                     if 'codeBlocks' in bubble_data and bubble_data['codeBlocks']:
                         msg['code_blocks'] = bubble_data['codeBlocks']
@@ -183,15 +322,14 @@ def extract_bubbles_for_composer(cursor, composer_id):
 
     return bubbles
 
-def extract_composer_conversations(global_db_path):
-    """Extract ALL Composer/Agent conversations - both inline and separate storage"""
+def extract_global_composers(global_db_path):
+    """Extract global composer data (both inline and separate storage)"""
     conversations = []
 
     try:
-        conn = sqlite3.connect(global_db_path)
+        conn = sqlite3.connect(f'file:{global_db_path}?mode=ro', uri=True)
         cursor = conn.cursor()
 
-        # Get all composerData entries
         cursor.execute("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
         results = cursor.fetchall()
 
@@ -207,22 +345,20 @@ def extract_composer_conversations(global_db_path):
                 code_contexts = []
                 diffs = []
 
-                # Check if conversation is stored inline or separately
                 inline_conversation = data.get('conversation', [])
 
                 if inline_conversation and len(inline_conversation) > 0:
-                    # INLINE STORAGE: Messages in composerData.conversation[]
+                    # INLINE STORAGE
                     for bubble in inline_conversation:
                         bubble_type = bubble.get('type')
                         text = bubble.get('text', '')
 
-                        if bubble_type == 1:  # User message
+                        if bubble_type == 1:
                             msg = {
                                 'role': 'user',
                                 'content': text
                             }
 
-                            # Extract code context
                             context = bubble.get('context', {})
                             if context and 'selections' in context:
                                 ctx = []
@@ -239,13 +375,12 @@ def extract_composer_conversations(global_db_path):
 
                             messages.append(msg)
 
-                        elif bubble_type == 2:  # AI response
+                        elif bubble_type == 2:
                             msg = {
                                 'role': 'assistant',
                                 'content': text
                             }
 
-                            # Extract code blocks and diffs
                             if 'codeBlocks' in bubble and bubble['codeBlocks']:
                                 msg['code_blocks'] = bubble['codeBlocks']
 
@@ -259,10 +394,9 @@ def extract_composer_conversations(global_db_path):
 
                             messages.append(msg)
                 else:
-                    # SEPARATE STORAGE: Messages in bubbleId:{composer}:{bubble} keys
+                    # SEPARATE STORAGE
                     messages = extract_bubbles_for_composer(cursor, composer_id)
 
-                    # Extract context and diffs from messages
                     for msg in messages:
                         if 'code_context' in msg:
                             code_contexts.extend(msg['code_context'])
@@ -274,7 +408,7 @@ def extract_composer_conversations(global_db_path):
                 if messages:
                     conversations.append({
                         'messages': messages,
-                        'source': 'cursor-composer',
+                        'source': 'cursor-global-composer',
                         'composer_id': composer_id,
                         'name': data.get('name', 'Untitled'),
                         'status': data.get('status'),
@@ -291,18 +425,16 @@ def extract_composer_conversations(global_db_path):
 
         conn.close()
     except Exception as e:
-        print(f"Error extracting composer from {global_db_path}: {e}")
+        print(f"Error extracting global composers: {e}")
 
     return conversations
 
 def main():
     print("="*80)
-    print("CURSOR COMPLETE DATA EXTRACTION (ALL VERSIONS & STORAGE FORMATS)")
+    print("CURSOR ULTIMATE EXTRACTION - ALL VERSIONS (v0.2 - v2.0+)")
     print("="*80)
     print()
 
-    # Find all Cursor installations
-    print("🔍 Searching for Cursor installations...")
     installations = find_cursor_installations()
 
     if not installations:
@@ -316,55 +448,69 @@ def main():
 
     all_conversations = []
     stats = defaultdict(int)
-    storage_stats = defaultdict(int)
 
     for installation in installations:
         print(f"📂 Processing: {installation}")
 
-        # Extract Chat mode (workspace storage)
+        # Extract from ALL workspace databases
         workspace_storage = installation / 'User/workspaceStorage'
         if workspace_storage.exists():
-            workspace_count = 0
+            aiservice_count = 0
+            workspace_composer_count = 0
+            chat_count = 0
+
             for workspace in workspace_storage.iterdir():
                 if workspace.is_dir() and workspace.name != 'ext-dev':
                     db_file = workspace / 'state.vscdb'
                     if db_file.exists():
+                        # Extract aiService (old format)
+                        convs = extract_aiservice_conversations(db_file, workspace.name)
+                        all_conversations.extend(convs)
+                        aiservice_count += len(convs)
+
+                        # Extract workspace composers
+                        convs = extract_workspace_composers(db_file, workspace.name)
+                        all_conversations.extend(convs)
+                        workspace_composer_count += len(convs)
+
+                        # Extract Chat mode
                         convs = extract_chat_mode(db_file, workspace.name)
                         all_conversations.extend(convs)
-                        workspace_count += len(convs)
+                        chat_count += len(convs)
 
-            print(f"   ✅ Chat mode: {workspace_count} conversations")
-            stats['chat'] += workspace_count
+            print(f"   ✅ aiService (old format): {aiservice_count} conversations")
+            print(f"   ✅ Workspace composers: {workspace_composer_count} conversations")
+            print(f"   ✅ Chat mode: {chat_count} conversations")
+            stats['aiservice'] += aiservice_count
+            stats['workspace_composer'] += workspace_composer_count
+            stats['chat'] += chat_count
 
-        # Extract Composer/Agent mode (global storage)
+        # Extract global composers
         global_storage = installation / 'User/globalStorage/state.vscdb'
         if global_storage.exists():
-            convs = extract_composer_conversations(global_storage)
+            convs = extract_global_composers(global_storage)
             all_conversations.extend(convs)
 
-            # Count storage types
             inline_count = sum(1 for c in convs if c.get('storage_type') == 'inline')
             separate_count = sum(1 for c in convs if c.get('storage_type') == 'separate')
 
-            print(f"   ✅ Composer/Agent: {len(convs)} conversations")
+            print(f"   ✅ Global composers: {len(convs)} conversations")
             print(f"      - Inline storage: {inline_count}")
             print(f"      - Separate storage: {separate_count}")
 
-            stats['composer'] += len(convs)
-            storage_stats['inline'] += inline_count
-            storage_stats['separate'] += separate_count
+            stats['global_composer'] += len(convs)
         else:
             print(f"   ⚠️  No global storage found")
 
     print()
     print("="*80)
-    print("EXTRACTION COMPLETE")
+    print("ULTIMATE EXTRACTION COMPLETE")
     print("="*80)
     print(f"Total conversations: {len(all_conversations):,}")
-    print(f"  Chat mode: {stats['chat']:,}")
-    print(f"  Composer/Agent: {stats['composer']:,}")
-    print(f"    - Inline storage: {storage_stats['inline']:,}")
-    print(f"    - Separate storage: {storage_stats['separate']:,}")
+    print(f"  aiService (v0.2-v0.43): {stats['aiservice']:,}")
+    print(f"  Workspace composers (v0.43-v1.x): {stats['workspace_composer']:,}")
+    print(f"  Global composers (v1.x-v2.0+): {stats['global_composer']:,}")
+    print(f"  Chat mode (v0.x-v1.x): {stats['chat']:,}")
 
     if not all_conversations:
         print("No conversations found!")
@@ -377,7 +523,7 @@ def main():
     complete = sum(1 for c in all_conversations
                    if any(m['role'] == 'assistant' for m in c['messages']))
 
-    print(f"Complete conversations: {complete:,}")
+    print(f"\nComplete conversations: {complete:,}")
     print(f"Total messages: {total_messages:,}")
     print(f"With code context: {with_code:,}")
     print(f"With diffs: {with_diffs:,}")
@@ -388,7 +534,7 @@ def main():
     output_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_file = output_dir / f'cursor_complete_{timestamp}.jsonl'
+    output_file = output_dir / f'cursor_ultimate_{timestamp}.jsonl'
 
     with open(output_file, 'w') as f:
         for conv in all_conversations:
