@@ -27,14 +27,18 @@ Extracts from Codex (if installed)
 - **Includes**: User/agent messages, tool results, diffs
 
 ### 3. `extract_cursor.py`
-Extracts from Cursor (Chat + Composer + Agent)
+Extracts from Cursor (Chat + Composer + Agent) - ALL VERSIONS
 - **Searches**: `~/Library/Application Support/Cursor` (macOS) or equivalent
 - **Formats**: SQLite databases (`state.vscdb`, `cursorDiskKV`)
+- **Handles**:
+  - Old Chat mode (workspace storage)
+  - Composer inline storage (v1.x - messages in composerData array)
+  - Composer separate storage (v1.x-v2.0 transition - messages in bubbleId keys)
+  - Latest Composer/Agent (v2.0+)
 - **Includes**:
-  - Old Chat mode conversations
-  - New Composer/Agent conversations (v2/v0.43+)
   - Code context, selections, diffs
   - Suggested edits and code blocks
+  - Tool results and execution outputs
 
 ### 4. `extract_trae.py`
 Extracts from Trae
@@ -154,16 +158,22 @@ Each script follows this pattern:
 - **Location**: `~/.claude/projects/[project]/[session].jsonl`
 - **Structure**: Event-based with type markers
 
-#### Cursor (v2)
+#### Cursor (v0.43 - v2.0+)
 - **Format**: SQLite databases
 - **Locations**:
   - Workspace: `~/Library/Application Support/Cursor/User/workspaceStorage/[hash]/state.vscdb`
   - Global: `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
 - **Tables**: `ItemTable` (Chat), `cursorDiskKV` (Composer/Agent)
+- **Storage Evolution**:
+  - **v0.x - v1.x**: Chat mode in workspace `ItemTable`
+  - **v1.x**: Composer inline (messages in `composerData.conversation[]`)
+  - **v1.x - v2.0 transition**: Composer separate (messages in `bubbleId:{composer}:{bubble}` keys)
+  - **v2.0+**: Latest format with enhanced metadata
 - **Keys**:
-  - `workbench.panel.aichat.view.aichat.chatdata` (Chat)
-  - `composerData:{uuid}` (Composer)
-  - `bubbleId:{composer}:{bubble}` (Messages)
+  - `workbench.panel.aichat.view.aichat.chatdata` (Chat mode)
+  - `composerData:{uuid}` (Composer metadata + conversation)
+  - `bubbleId:{composer}:{bubble}` (Individual messages - transitional format)
+  - `codeBlockDiff:{id}` (Code block diffs)
 
 #### Trae / Windsurf
 - **Format**: Hybrid (JSONL + SQLite)

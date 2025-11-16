@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Extract ALL Cursor data: Chat, Composer, Agent, Tabs
-Includes: messages, code context, diffs, file references, suggested edits
-Auto-discovers Cursor installations on the device
+COMPLETE Cursor extraction - handles ALL storage formats:
+- Chat mode (workspace ItemTable)
+- Composer inline storage (conversation array in composerData)
+- Composer separate storage (bubbleId keys)
+- Code block diffs (codeBlockDiff keys)
+
+This extractor finds ALL Cursor data across all versions and storage formats.
 """
 
 import json
@@ -114,8 +118,73 @@ def extract_chat_mode(db_path, workspace_id):
 
     return conversations
 
+def extract_bubbles_for_composer(cursor, composer_id):
+    """Extract all separate bubble entries for a composer"""
+    bubbles = []
+
+    try:
+        # Get all bubbles for this composer
+        cursor.execute(
+            "SELECT key, value FROM cursorDiskKV WHERE key LIKE ?",
+            (f'bubbleId:{composer_id}:%',)
+        )
+
+        for key, value in cursor.fetchall():
+            if not value:
+                continue
+
+            try:
+                bubble_data = json.loads(value)
+                bubble_type = bubble_data.get('type')
+                text = bubble_data.get('text', '')
+
+                msg = {
+                    'role': 'user' if bubble_type == 1 else 'assistant',
+                    'content': text,
+                    'bubble_id': key.split(':')[2]
+                }
+
+                # Extract code context for user messages
+                if bubble_type == 1:
+                    # Check for selections in the bubble data
+                    if 'selections' in bubble_data:
+                        ctx = []
+                        for sel in bubble_data.get('selections', []):
+                            if 'uri' in sel and 'fsPath' in sel.get('uri', {}):
+                                ctx.append({
+                                    'file': sel['uri']['fsPath'],
+                                    'code': sel.get('text', sel.get('rawText', '')),
+                                    'range': sel.get('range')
+                                })
+                        if ctx:
+                            msg['code_context'] = ctx
+
+                # Extract diffs and code blocks for AI messages
+                elif bubble_type == 2:
+                    if 'codeBlocks' in bubble_data and bubble_data['codeBlocks']:
+                        msg['code_blocks'] = bubble_data['codeBlocks']
+
+                    if 'suggestedCodeBlocks' in bubble_data and bubble_data['suggestedCodeBlocks']:
+                        msg['suggested_code_blocks'] = bubble_data['suggestedCodeBlocks']
+
+                    if 'diffHistories' in bubble_data and bubble_data['diffHistories']:
+                        msg['diff_histories'] = bubble_data['diffHistories']
+
+                    if 'toolResults' in bubble_data and bubble_data['toolResults']:
+                        msg['tool_results'] = bubble_data['toolResults']
+
+                bubbles.append(msg)
+
+            except json.JSONDecodeError:
+                continue
+
+    except Exception as e:
+        pass
+
+    return bubbles
+
 def extract_composer_conversations(global_db_path):
-    """Extract Composer/Agent conversations from global storage"""
+    """Extract ALL Composer/Agent conversations - both inline and separate storage"""
     conversations = []
 
     try:
@@ -132,15 +201,18 @@ def extract_composer_conversations(global_db_path):
 
             try:
                 data = json.loads(value)
+                composer_id = data.get('composerId', key.split(':')[1])
 
-                if 'conversation' in data and len(data['conversation']) > 0:
-                    composer_id = data.get('composerId', key.split(':')[1])
+                messages = []
+                code_contexts = []
+                diffs = []
 
-                    messages = []
-                    code_contexts = []
-                    diffs = []
+                # Check if conversation is stored inline or separately
+                inline_conversation = data.get('conversation', [])
 
-                    for bubble in data['conversation']:
+                if inline_conversation and len(inline_conversation) > 0:
+                    # INLINE STORAGE: Messages in composerData.conversation[]
+                    for bubble in inline_conversation:
                         bubble_type = bubble.get('type')
                         text = bubble.get('text', '')
 
@@ -173,35 +245,46 @@ def extract_composer_conversations(global_db_path):
                                 'content': text
                             }
 
-                            # Extract code blocks
+                            # Extract code blocks and diffs
                             if 'codeBlocks' in bubble and bubble['codeBlocks']:
                                 msg['code_blocks'] = bubble['codeBlocks']
 
-                            # Extract suggested diffs
                             if 'suggestedCodeBlocks' in bubble and bubble['suggestedCodeBlocks']:
                                 msg['suggested_code_blocks'] = bubble['suggestedCodeBlocks']
                                 diffs.extend(bubble['suggestedCodeBlocks'])
 
-                            # Extract diff histories
                             if 'diffHistories' in bubble and bubble['diffHistories']:
                                 msg['diff_histories'] = bubble['diffHistories']
                                 diffs.extend(bubble['diffHistories'])
 
                             messages.append(msg)
+                else:
+                    # SEPARATE STORAGE: Messages in bubbleId:{composer}:{bubble} keys
+                    messages = extract_bubbles_for_composer(cursor, composer_id)
 
-                    if messages:
-                        conversations.append({
-                            'messages': messages,
-                            'source': 'cursor-composer',
-                            'composer_id': composer_id,
-                            'name': data.get('name', 'Untitled'),
-                            'status': data.get('status'),
-                            'unified_mode': data.get('unifiedMode'),  # agent or chat
-                            'created_at': data.get('createdAt'),
-                            'updated_at': data.get('lastUpdatedAt'),
-                            'has_code_context': len(code_contexts) > 0,
-                            'has_diffs': len(diffs) > 0
-                        })
+                    # Extract context and diffs from messages
+                    for msg in messages:
+                        if 'code_context' in msg:
+                            code_contexts.extend(msg['code_context'])
+                        if 'suggested_code_blocks' in msg:
+                            diffs.extend(msg['suggested_code_blocks'])
+                        if 'diff_histories' in msg:
+                            diffs.extend(msg['diff_histories'])
+
+                if messages:
+                    conversations.append({
+                        'messages': messages,
+                        'source': 'cursor-composer',
+                        'composer_id': composer_id,
+                        'name': data.get('name', 'Untitled'),
+                        'status': data.get('status'),
+                        'unified_mode': data.get('unifiedMode'),
+                        'created_at': data.get('createdAt'),
+                        'updated_at': data.get('lastUpdatedAt'),
+                        'has_code_context': len(code_contexts) > 0,
+                        'has_diffs': len(diffs) > 0,
+                        'storage_type': 'inline' if inline_conversation else 'separate'
+                    })
 
             except (json.JSONDecodeError, KeyError) as e:
                 continue
@@ -214,7 +297,7 @@ def extract_composer_conversations(global_db_path):
 
 def main():
     print("="*80)
-    print("CURSOR COMPLETE DATA EXTRACTION (Chat + Composer + Agent)")
+    print("CURSOR COMPLETE DATA EXTRACTION (ALL VERSIONS & STORAGE FORMATS)")
     print("="*80)
     print()
 
@@ -233,6 +316,7 @@ def main():
 
     all_conversations = []
     stats = defaultdict(int)
+    storage_stats = defaultdict(int)
 
     for installation in installations:
         print(f"📂 Processing: {installation}")
@@ -257,8 +341,18 @@ def main():
         if global_storage.exists():
             convs = extract_composer_conversations(global_storage)
             all_conversations.extend(convs)
+
+            # Count storage types
+            inline_count = sum(1 for c in convs if c.get('storage_type') == 'inline')
+            separate_count = sum(1 for c in convs if c.get('storage_type') == 'separate')
+
             print(f"   ✅ Composer/Agent: {len(convs)} conversations")
+            print(f"      - Inline storage: {inline_count}")
+            print(f"      - Separate storage: {separate_count}")
+
             stats['composer'] += len(convs)
+            storage_stats['inline'] += inline_count
+            storage_stats['separate'] += separate_count
         else:
             print(f"   ⚠️  No global storage found")
 
@@ -269,6 +363,8 @@ def main():
     print(f"Total conversations: {len(all_conversations):,}")
     print(f"  Chat mode: {stats['chat']:,}")
     print(f"  Composer/Agent: {stats['composer']:,}")
+    print(f"    - Inline storage: {storage_stats['inline']:,}")
+    print(f"    - Separate storage: {storage_stats['separate']:,}")
 
     if not all_conversations:
         print("No conversations found!")
